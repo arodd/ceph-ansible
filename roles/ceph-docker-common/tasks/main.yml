@@ -21,3 +21,58 @@
 - set_fact:
     monitor_name: "{{ ansible_fqdn }}"
   when: mon_use_fqdn
+
+- name: check if a cluster is already running
+  command: "docker ps -q -a --filter='ancestor={{ ceph_docker_image }}:{{ ceph_docker_image_tag }}'"
+  register: ceph_health
+  changed_when: false
+  failed_when: false
+  always_run: true
+
+- include: checks.yml
+  when:
+    - (not containerized_deployment_with_kv and
+       ((inventory_hostname in groups.get(mon_group_name, [])) or
+        (inventory_hostname in groups.get(nfs_group_name, [])))) or
+      (not containerized_deployment_with_kv and inventory_hostname in groups.get(osd_group_name, []))
+    - ceph_health.rc != 0
+    - not "{{ rolling_update | default(false) }}"
+
+- include: "./misc/ntp_atomic.yml"
+  when:
+    - is_atomic
+    - ansible_os_family == 'RedHat'
+    - ntp_service_enabled
+
+- include: "./misc/ntp_redhat.yml"
+  when:
+    - not is_atomic
+    - ansible_os_family == 'RedHat'
+    - ntp_service_enabled
+
+- include: "./misc/ntp_debian.yml"
+  when:
+    - ansible_os_family == 'Debian'
+    - ntp_service_enabled
+
+- include: "./fetch_image.yml"
+
+# NOTE (jimcurtis): dirs_permissions.yml must precede fetch_configs.yml
+# # because it creates the directories needed by the latter.
+- include: ./dirs_permissions.yml
+
+# let the first mon create configs and keyrings
+- include: create_configs.yml
+  when:
+    - (not mon_containerized_default_ceph_conf_with_kv and (inventory_hostname in groups.get(mon_group_name, []))) or
+      (not mon_containerized_default_ceph_conf_with_kv and ((groups.get(nfs_group_name, []) | length > 0) and (inventory_hostname == groups.get(nfs_group_name, [])[0])))
+
+- include: fetch_configs.yml
+  when:
+    - (not containerized_deployment_with_kv and ((inventory_hostname in groups.get(mon_group_name, [])) or (inventory_hostname in groups.get(nfs_group_name, [])))) or
+      (not containerized_deployment_with_kv and (inventory_hostname in groups.get(osd_group_name, []))) or
+      (inventory_hostname in groups.get('mdss', [])) or
+      (inventory_hostname in groups.get('mgrs', [])) or
+      (inventory_hostname in groups.get('rgws', []))
+
+- include: selinux.yml
